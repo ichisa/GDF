@@ -1,10 +1,24 @@
-kGDF <- function(k=1, y, fm, data, distr = "normal", mod = "GLM", noise = 0.25, perf, pass, method="jackknife"){
+kGDF <- function(k=1, y, fm, data, distr = "normal", mod = "GLM", nfit=1, noise = 0.25, perf=1, ndata=NULL,  pass, method="jackknife"){
+  
+  #' 
+  #' @y observed output data
+  #' @fm formula
+  #' @data input data 
+  #' @distr ditribution of the added noise
+  #' @model model type
+  #' @noise sd of the noise (whe it is a nomrmal distribution)
+  #' @perf n.trees to predict BRT
+  #' @pass number of loops to re run the model
+  #' @method jacknife or bootstrap
+  #' @nfit number of times that each model is fitted with the same data
+  
+  if (!is.null(ndata)) {data = data[1:ndata,]; y=y[1:ndata]}
   
   # sample size n 
   n <- length(y)
   
   #set noise
-  if(distr == "normal") noise <- noise*sd(y)
+  if(distr == "normal" ) noise <- noise*sd(y)
   
   # dataframes for ye and yehat
   ye <- yehat <- data.frame(rep(NA,n))
@@ -36,33 +50,46 @@ kGDF <- function(k=1, y, fm, data, distr = "normal", mod = "GLM", noise = 0.25, 
             fill.up <- sample(1:n, size=k-length(to.fill), replace=F) # fill up sample of size k
             to.use <- c(to.fill, fill.up)
           }
-          if (distr == "normal") y2[to.use] <- y2[to.use]+rnorm(k, 0, noise)
+          if (distr == "normal") y2[to.use] <- y2[to.use]+rnorm(k, 0, noise) #
           if(distr == "binary") y2[to.use] <- !y2[to.use]
           check.NA[to.use] <- 1 # mark perturbed subset 
         }
         
         assign("y2", y2, envir = .GlobalEnv) # provide "y2" in the global environment 
-        
-        # accommodate model with perturbed data
-        if(mod == "GLM" | mod == "GAM" | mod == "ANN") fm.updated <- update(fm, y2 ~., data=data)
-        if(mod == "rF"){
-          if(fm$type == "regression") fm.updated <- update(fm, y2 ~., data=data)
-          if(fm$type == "classification") fm.updated <- update(fm, as.factor(y2) ~., data=data)
-        }
-        if(mod == "BRT") fm.updated <- update(fm, as.formula(y2~.), data=data)
-        
         # store intermediates
         ye[,i] <- y2
-        if(mod == "rF"){
-          if(fm$type == "regression") yehat[,i] <- predict(fm.updated, type="response")
-          if(fm$type == "classification") yehat[,i] <- predict(fm.updated, type="prob")[, 2]           
+        
+        yehat.temp <- matrix(NA, nrow=n, ncol=nfit)
+        
+        for (t in 1:nfit){ # fit the model many times with the same data and average allong resuls
+          # accommodate model with perturbed data
+          if(mod == "GLM" | mod == "GAM" | mod == "ANN") fm.updated <- update(fm, y2 ~., data=data)
+          if(mod == "rF"){
+            if(fm$type == "regression") fm.updated <- update(fm, y2 ~., data=data)
+            if(fm$type == "classification") fm.updated <- update(fm, as.factor(y2) ~., data=data)
+          }
+          if(mod == "BRT") fm.updated <- update(fm, as.formula(y2~.), data=data)
+          if(mod == "ranger"){ 
+            ran <- data.frame(cbind(y2, data))
+            fm.updated <- ranger( y2~  .,  data=ran)
+          }
+          
+          if(mod == "rF"){
+            if(fm$type == "regression") yehat.temp[,t] <- predict(fm.updated, newdata=data, type="response")
+            #if(fm$type == "regression") yehat[,i] <- predict(fm.updated, type="response")
+            if(fm$type == "classification") yehat.temp[,t] <- predict(fm.updated, newdata=data, type="prob")[, 2]           
+          }
+          if(mod == "ANN")  yehat.temp[,t] <- predict(fm.updated, type="raw")
+          if(mod == "GLM" | mod == "GAM") yehat.temp[,t] <- predict(fm.updated, type="response")
+          if(mod == "BRT") yehat.temp[,t] <- predict(fm.updated, type="response", n.trees=perf)
+          if(mod == "ranger")  yehat.temp[,t] <- predict(fm.updated, data=data)$predictions
+          
         }
-        if(mod == "ANN")  yehat[,i] <- predict(fm.updated, type="raw")
-        if(mod == "GLM" | mod == "GAM") yehat[,i] <- predict(fm.updated, type="response")
-        if(mod == "BRT") yehat[,i <- predict(fm.updated, type="response", n.trees=perf)]
+        
+        yehat[,i] <- rowMeans(yehat.temp)
         i <- i+1 # move one column further in the data frames
         # Remove y2 from global environment
-        rm(y2, envir= .GlobalEnv) 
+        rm(y2, envir= .GlobalEnv)
       }
     }
     cat("i =",i-1)
@@ -77,22 +104,33 @@ kGDF <- function(k=1, y, fm, data, distr = "normal", mod = "GLM", noise = 0.25, 
       if(distr == "binary") y2[to.perturb] <- !y2[to.perturb]
       assign("y2", y2, envir = .GlobalEnv) # for model update needed, apparently
       
-      # accommodate model with perturbed data
-      if(mod == "GLM" | mod == "GAM" | mod == "ANN") fm.updated <- update(fm, y2 ~., data=data)
-      if(mod == "rF" & distr == "normal") update(fm, y2 ~., data=data)
-      if(mod == "rF" & distr == "binary") update(fm, as.factor(y2) ~., data=data)
-      if(mod == "BRT") fm.updated <- update(fm, as.formula(y2~.), data = data)
-      
-      # store intermediates
-      ye[,i] <- y2
-      if(mod == "rF"){
-        if(fm$type == "regression") yehat[,i] <- predict(fm.updated, type="response")
-        if(fm$type == "classification") yehat[,i] <- predict(fm.updated, type="prob")[, 2]           
+      yehat.temp <- matrix(NA, nrow=n, ncol=nfit)
+      for (t in 1:nfit){ # fit the model many times with the same data and average allong resuls
+        
+        # accommodate model with perturbed data
+        if(mod == "GLM" | mod == "GAM" | mod == "ANN") fm.updated <- update(fm, y2 ~., data=data)
+        #In this line update should maybe designed to fm.update
+        if(mod == "rF" & distr == "normal") fm.updated <- update(fm, y2 ~., data=data)
+        if(mod == "rF" & distr == "binary") fm.updated <- update(fm, as.factor(y2) ~., data=data)
+        if(mod == "BRT") fm.updated <- update(fm, as.formula(y2~.), data = data)
+        if(mod == "ranger"){ 
+          ran <- data.frame(cbind(y2, data))
+          fm.updated <- ranger( y2~  .,  data=data)
+        }
+        # store intermediates
+        ye[,i] <- y2
+        if(mod == "rF"){
+          # in this line newdata should be detailed to avoid out of bag prediction
+          if(fm$type == "regression") yehat.temp[,t] <- predict(fm.updated, newdata=data, type="response")
+          if(fm$type == "classification") yehat.temp[,t] <- predict(fm.updated, newdata=data, type="prob")[, 2]           
+        }
+        if(mod == "ANN")  yehat.temp[,t] <- predict(fm.updated, type="raw")
+        if(mod == "GLM" | mod == "GAM") yehat.temp[,t] <- predict(fm.updated, type="response")
+        if(mod == "BRT") yehat.temp[,t] <- predict(fm.updated, type="response", n.trees=perf)
+        if(mod == "ranger")  yehat.temp[,t] <- predict(fm.updated, data=data)$predictions
       }
-      if(mod == "ANN")  yehat[,i] <- predict(fm.updated, type="raw")
-      if(mod == "GLM" | mod == "GAM") yehat[,i] <- predict(fm.updated, type="response")
-      if(mod == "BRT") yehat[,i <- predict(fm.updated, type="response", n.trees=perf)]
       
+      yehat[,i] <- rowMeans(yehat.temp)
       rm(y2, envir= .GlobalEnv) 
     }
   }
